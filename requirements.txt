@@ -1,5 +1,6 @@
-gradio
-transformers
+fastapi
+uvicorn
 torch
+transformers
 numpy
 pydantic

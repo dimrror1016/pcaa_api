@@ -1,22 +1,48 @@
-import gradio as gr
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
 import numpy as np
-from fastapi import FastAPI, Request
-import uvicorn
-import json
+from pathlib import Path
 
 # -------------------------
 # CONFIG
 # -------------------------
-MODEL_NAME = "monologg/bert-base-cased-goemotions-original"
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
-model.eval()
-LABELS = model.config.id2label
+LOCAL_MODEL_PATH = Path("./models/goemotions")  # keep in repo
+
+if not LOCAL_MODEL_PATH.exists():
+    raise RuntimeError(
+        f"Local model not found at {LOCAL_MODEL_PATH}. "
+        f"Download it first using huggingface-cli."
+    )
 
 # -------------------------
-# Emotion -> Flower mapping
+# LOAD MODEL ON STARTUP
+# -------------------------
+print("Loading emotion model...")
+tokenizer = AutoTokenizer.from_pretrained(LOCAL_MODEL_PATH, local_files_only=True)
+model = AutoModelForSequenceClassification.from_pretrained(LOCAL_MODEL_PATH, local_files_only=True)
+model.eval()
+LABELS = model.config.id2label
+print("Model loaded successfully!")
+
+# -------------------------
+# FastAPI app
+# -------------------------
+app = FastAPI(title="Princesa Emotion API 🌸")
+
+# Allow CORS for all domains (PHP frontend can access)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# -------------------------
+# Emotion mapping
 # -------------------------
 GOEMO_TO_FLOWERS = {
     "admiration": "Admiration",
@@ -47,6 +73,8 @@ GOEMO_TO_FLOWERS = {
     "sadness": "Sadness",
     "disappointment": "Disappointment"
 }
+
+FLOWER_EMOTIONS = sorted(set(GOEMO_TO_FLOWERS.values()))
 
 def get_flower_type(emotion: str) -> str:
     flower_map = {
@@ -81,23 +109,35 @@ def get_flower_type(emotion: str) -> str:
     return flower_map.get(emotion, "Unknown")
 
 # -------------------------
-# Prediction function
+# Request/Response Models
 # -------------------------
-def predict_flower(text: str, threshold: float = 0.3, top_k: int = 3):
+class TextIn(BaseModel):
+    text: str
+    threshold: float = 0.3
+    top_k: int = 3
+
+# -------------------------
+# Prediction endpoint
+# -------------------------
+@app.post("/predict_emotion")
+async def predict_emotion(data: TextIn):
+
     inputs = tokenizer(
-        text,
+        data.text,
         return_tensors="pt",
         truncation=True,
         padding=True,
         max_length=512
     )
+
     with torch.no_grad():
         logits = model(**inputs).logits
 
-    probs = torch.sigmoid(logits)[0].cpu().numpy()
-    indices = np.where(probs > threshold)[0]
+    probs = torch.sigmoid(logits).cpu()[0].numpy()
+
+    indices = np.where(probs > data.threshold)[0]
     if len(indices) == 0:
-        indices = np.argsort(probs)[-top_k:][::-1]
+        indices = np.argsort(probs)[-data.top_k:][::-1]
 
     flower_scores = {}
     for idx in indices:
@@ -107,12 +147,16 @@ def predict_flower(text: str, threshold: float = 0.3, top_k: int = 3):
         flower_scores[flower] = max(score, flower_scores.get(flower, 0))
 
     results = [
-        {"flower_emotion": flower, "score": score, "flower_type": get_flower_type(flower)}
+        {
+            "flower_emotion": flower,
+            "score": score,
+            "flower_type": get_flower_type(flower)
+        }
         for flower, score in flower_scores.items()
     ]
 
     results.sort(key=lambda x: x["score"], reverse=True)
-    results = results[:top_k]
+    results = results[:data.top_k]
 
     dominant = results[0] if results else {
         "flower_emotion": "Neutral/Unknown",
@@ -120,53 +164,31 @@ def predict_flower(text: str, threshold: float = 0.3, top_k: int = 3):
         "flower_type": "Unknown"
     }
 
-    # Return the same format PHP expects
-    return [dominant["flower_emotion"], dominant["score"]]
+    return {
+        "text": data.text,
+        "dominant_emotion": dominant["flower_emotion"],
+        "dominant_score": dominant["score"],
+        "all_emotions": results,
+        "threshold_used": data.threshold
+    }
 
 # -------------------------
-# Gradio Interface
+# List all flower emotions
 # -------------------------
-iface = gr.Interface(
-    fn=predict_flower,
-    inputs=[
-        gr.Textbox(lines=2, placeholder="Type your text here...", label="Text"),
-        gr.Slider(minimum=0, maximum=1, step=0.05, value=0.3, label="Threshold"),
-        gr.Slider(minimum=1, maximum=10, step=1, value=3, label="Top K")
-    ],
-    outputs=[
-        gr.Textbox(label="Dominant Flower Emotion"),
-        gr.Number(label="Score")
-    ],
-    title="Princesa Emotion API 🌸",
-    description="Enter a sentence to detect the dominant flower emotion."
-)
+@app.get("/flower_emotions")
+async def get_flower_emotions():
+    return {
+        "available_emotions": FLOWER_EMOTIONS,
+        "count": len(FLOWER_EMOTIONS)
+    }
 
 # -------------------------
-# FastAPI for PHP integration
+# Health check
 # -------------------------
-app = FastAPI()
-
-@app.post("/api/predict/")
-async def api_predict(request: Request):
-    try:
-        payload = await request.json()
-        data = payload.get("data", [])
-        if len(data) < 1:
-            return {"error": "No text provided."}
-
-        text = data[0]
-        threshold = float(data[1]) if len(data) > 1 else 0.3
-        top_k = int(data[2]) if len(data) > 2 else 3
-
-        flower_emotion, score = predict_flower(text, threshold, top_k)
-        return {"data": [flower_emotion, score]}
-
-    except Exception as e:
-        return {"error": str(e)}
-
-# -------------------------
-# Launch both Gradio UI + FastAPI
-# -------------------------
-if __name__ == "__main__":
-    iface.queue()
-    iface.launch(server_name="0.0.0.0", server_port=7860, share=True)
+@app.get("/")
+async def root():
+    return {
+        "message": "Princesa Emotion API 🌸",
+        "flower_emotions": len(FLOWER_EMOTIONS),
+        "status": "running offline"
+    }
