@@ -4,25 +4,18 @@ from pydantic import BaseModel
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
 import numpy as np
-from pathlib import Path
 
 # -------------------------
 # CONFIG
 # -------------------------
-LOCAL_MODEL_PATH = Path("./models/goemotions")  # keep in repo
-
-if not LOCAL_MODEL_PATH.exists():
-    raise RuntimeError(
-        f"Local model not found at {LOCAL_MODEL_PATH}. "
-        f"Download it first using huggingface-cli."
-    )
+MODEL_NAME = "monologg/bert-base-cased-goemotions-original"
 
 # -------------------------
 # LOAD MODEL ON STARTUP
 # -------------------------
-print("Loading emotion model...")
-tokenizer = AutoTokenizer.from_pretrained(LOCAL_MODEL_PATH, local_files_only=True)
-model = AutoModelForSequenceClassification.from_pretrained(LOCAL_MODEL_PATH, local_files_only=True)
+print("Loading emotion model from Hugging Face...")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
 model.eval()
 LABELS = model.config.id2label
 print("Model loaded successfully!")
@@ -32,7 +25,7 @@ print("Model loaded successfully!")
 # -------------------------
 app = FastAPI(title="Princesa Emotion API 🌸")
 
-# Allow CORS for all domains (PHP frontend can access)
+# Allow CORS (PHP frontend can call this API)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -121,7 +114,6 @@ class TextIn(BaseModel):
 # -------------------------
 @app.post("/predict_emotion")
 async def predict_emotion(data: TextIn):
-
     inputs = tokenizer(
         data.text,
         return_tensors="pt",
@@ -134,7 +126,6 @@ async def predict_emotion(data: TextIn):
         logits = model(**inputs).logits
 
     probs = torch.sigmoid(logits).cpu()[0].numpy()
-
     indices = np.where(probs > data.threshold)[0]
     if len(indices) == 0:
         indices = np.argsort(probs)[-data.top_k:][::-1]
@@ -147,22 +138,14 @@ async def predict_emotion(data: TextIn):
         flower_scores[flower] = max(score, flower_scores.get(flower, 0))
 
     results = [
-        {
-            "flower_emotion": flower,
-            "score": score,
-            "flower_type": get_flower_type(flower)
-        }
+        {"flower_emotion": flower, "score": score, "flower_type": get_flower_type(flower)}
         for flower, score in flower_scores.items()
     ]
 
     results.sort(key=lambda x: x["score"], reverse=True)
     results = results[:data.top_k]
 
-    dominant = results[0] if results else {
-        "flower_emotion": "Neutral/Unknown",
-        "score": 0.0,
-        "flower_type": "Unknown"
-    }
+    dominant = results[0] if results else {"flower_emotion": "Neutral/Unknown", "score": 0.0, "flower_type": "Unknown"}
 
     return {
         "text": data.text,
@@ -177,18 +160,11 @@ async def predict_emotion(data: TextIn):
 # -------------------------
 @app.get("/flower_emotions")
 async def get_flower_emotions():
-    return {
-        "available_emotions": FLOWER_EMOTIONS,
-        "count": len(FLOWER_EMOTIONS)
-    }
+    return {"available_emotions": FLOWER_EMOTIONS, "count": len(FLOWER_EMOTIONS)}
 
 # -------------------------
 # Health check
 # -------------------------
 @app.get("/")
 async def root():
-    return {
-        "message": "Princesa Emotion API 🌸",
-        "flower_emotions": len(FLOWER_EMOTIONS),
-        "status": "running offline"
-    }
+    return {"message": "Princesa Emotion API 🌸", "flower_emotions": len(FLOWER_EMOTIONS), "status": "running"}
