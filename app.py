@@ -1,7 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
 import numpy as np
 
@@ -10,22 +9,33 @@ import numpy as np
 # -------------------------
 MODEL_NAME = "monologg/bert-base-cased-goemotions-original"
 
+# Lazy-loading placeholders
+tokenizer = None
+model = None
+LABELS = None
+
 # -------------------------
-# LOAD MODEL ON STARTUP
+# Lazy-load model
 # -------------------------
-print("Loading emotion model from Hugging Face...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
-model.eval()
-LABELS = model.config.id2label
-print("Model loaded successfully!")
+def get_model():
+    global tokenizer, model, LABELS
+    if model is None:
+        from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+        print("Loading Hugging Face emotion model...")
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+        model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
+        model.eval()
+        LABELS = model.config.id2label
+        print("Model loaded successfully!")
+    return tokenizer, model, LABELS
 
 # -------------------------
 # FastAPI app
 # -------------------------
 app = FastAPI(title="Princesa Emotion API 🌸")
 
-# Allow CORS (PHP frontend can call this API)
+# Allow CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -114,6 +124,8 @@ class TextIn(BaseModel):
 # -------------------------
 @app.post("/predict_emotion")
 async def predict_emotion(data: TextIn):
+    tokenizer, model, LABELS = get_model()
+
     inputs = tokenizer(
         data.text,
         return_tensors="pt",
